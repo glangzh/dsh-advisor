@@ -1,0 +1,14 @@
+# dsh-advisor bundle patch — 全局启用 `advisor` 顾问工具。
+#
+# 安装后 advisor 工具对所有会话可见。若只想在特定 Agent 预设内使用，
+# 请改用 preset/ 目录（Agent 预设入口），勿同时安装两者（同名工具冲突）。
+- insert:
+    - id: advisor
+      name: dsh-advisor-plugin
+      config:
+        advisorProvider: deepseek-official
+        advisorModel: deepseek-v4-pro
+        maxTokens: 4096
+        timeoutMs: 180000
+        windowMessages: 8
+        windowChars: 8000

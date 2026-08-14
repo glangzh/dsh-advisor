@@ -1,0 +1,19 @@
+{
+  "name": "dsh-advisor-plugin",
+  "version": "0.1.0",
+  "description": "Advisor strategy for DeepSeek Harness: escalate hard decisions from the executor (deepseek-v4-flash) to deepseek-v4-pro through the official subagents channel.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -12,9 +12,9 @@
 import Schema from '@deepseek-ai/schemastery';
 
 export const name = 'advisor';
-export const inject = ['tools', 'subagents', 'systemPrompt'];
+export const inject = ['tools', 'subagents', 'systemPrompt', 'llm'];
 
-// 配置 schema：Cordis 加载时校验并填充默认值（规范：默认值写在 schema 中）
+// 配置 schema：Cordis 加载时校验并填充默认值（默认值写在 schema 中）
 export const Config = Schema.object({
   advisorProvider: Schema.string().default('deepseek-official'),
   advisorModel: Schema.string().default('deepseek-v4-pro'),
@@ -22,6 +22,7 @@ export const Config = Schema.object({
   timeoutMs: Schema.number().default(180000),
   windowMessages: Schema.number().default(8),
   windowChars: Schema.number().default(8000),
+  maxAdviceChars: Schema.number().default(4000),
 });
 
 export function apply(ctx, config = {}) {
@@ -31,6 +32,22 @@ export function apply(ctx, config = {}) {
   const timeoutMs = Number.isFinite(config.timeoutMs) ? config.timeoutMs : 180000;
   const windowMessages = Number.isFinite(config.windowMessages) ? config.windowMessages : 8;
   const windowChars = Number.isFinite(config.windowChars) ? config.windowChars : 8000;
+  const maxAdviceChars = Number.isFinite(config.maxAdviceChars) ? config.maxAdviceChars : 4000;
+
+  // ── 配置预检（非阻塞）：provider 是否注册、model 是否可解析 ─────────────
+  // 失败只告警不阻断：配置错误会在实际调用时以清晰错误暴露。
+  (async () => {
+    try {
+      const providers = ctx.llm.listProviders();
+      if (!providers.some((p) => p.id === provider)) {
+        console.warn(`[advisor] provider "${provider}" 未注册（已注册: ${providers.map((p) => p.id).join(', ')}）——顾问调用将失败`);
+        return;
+      }
+      await ctx.llm.resolveModelInfo(provider, model, AbortSignal.timeout(5000));
+    } catch (e) {
+      console.warn(`[advisor] 配置预检失败: ${e && e.message ? e.message : String(e)}（顾问仍会尝试实际调用）`);
+    }
+  })();
 
   // ── 自动蒸馏：最近 N 条消息的纯文本，保头保尾截断 ──────────────────────
   function distillHistory(session) {
@@ -60,17 +77,23 @@ export function apply(ctx, config = {}) {
     return out;
   }
 
-  // ── 顾问调用：官方 subagents 机制（spawn v4-pro 子代理，完整审计）────────
-  // 子代理由 agent-loop 驱动：请求/响应/usage 记录进其独立 session 并计入
-  // token-meter，失败重试走 llm-retry；spawn 为独立上下文，prompt 自带全部
-  // 蒸馏后的上下文，maxDepth: 1 禁止顾问再委派。
+  // ── 顾问调用：官方 subagents 机制（spawn v4-pro 子代理，全程审计）────────
+  // 风险控制：
+  //   - toolFilter { allow: [] } 屏蔽 host 全局工具；
+  //   - 提示词硬约束不得调用任何工具（preset 作用域工具无法在服务层收窄，
+  //     由提示词 + maxTokens + 蒸馏窗口兜底）；
+  //   - maxDepth: 1 禁止顾问再委派；delegationDepth 硬拒绝（见 execute）；
+  //   - 不自动重试：SubagentResult 无 failure code，无法区分瞬时/永久错误，
+  //     宁可让执行者拿到清晰的失败（含部分输出）也不重复消耗。
   async function consult(question, context, parent, signal) {
     const task = [
       'You are the advisor in an executor+advisor architecture.',
       'The executor runs on a cheaper model and escalated to you for judgment.',
       'Give decision-ready guidance: what to do, what to avoid, edge cases, and a review checklist.',
       'Answer the specific question directly; do not rewrite the whole task.',
-      'Do NOT call any tools; reply with your guidance as plain text only.',
+      'CRITICAL: Do NOT call any tools, do NOT read files, do NOT run commands, do NOT spawn subagents. ' +
+        'This is a pure advisory call; any tool use is a failure. Reply with guidance as plain text only.',
+      'Keep the reply focused and actionable; prefer concise bullets over long prose.',
       '',
       '## Context from the executor',
       context,
@@ -87,6 +110,7 @@ export function apply(ctx, config = {}) {
         model,
         maxTokens,
       },
+      toolFilter: { allow: [] },
       maxDepth: 1,
       signal,
     });
@@ -97,7 +121,11 @@ export function apply(ctx, config = {}) {
           .map((b) => b.text)
           .join('')
           .trim();
-        throw new Error('advisor subagent ended with stop reason ' + String(result.stopReason) + (partial ? '\nPartial output:\n' + partial : ''));
+        throw new Error(
+          'advisor subagent ended with stop reason ' + String(result.stopReason) +
+          '（请检查 advisorProvider/advisorModel 配置与模型可用性）' +
+          (partial ? '\nPartial output:\n' + partial : '')
+        );
       }
       const text = (result.output || [])
         .filter((b) => b && b.type === 'text')
@@ -114,6 +142,12 @@ export function apply(ctx, config = {}) {
     }
     if (disposal.status === 'rejected') throw disposal.reason;
     return execution.value;
+  }
+
+  // ── 结果截断：限制 advice 大小，防止污染主会话上下文 ───────────────────
+  function clipAdvice(text) {
+    if (text.length <= maxAdviceChars) return text;
+    return text.slice(0, maxAdviceChars) + '\n…[advisor output truncated]…';
   }
 
   // ── 工具注册（fiber 绑定，随会话/预设卸载自动清理）──────────────────────
@@ -154,14 +188,22 @@ export function apply(ctx, config = {}) {
       if (depth > 0) {
         throw new Error('advisor tool is executor-only: subagents must never call the advisor. Let the top-level executor escalate instead.');
       }
-      const cwd = (session && session.header && session.header.cwd) || '';
+      // 执行者与顾问同模型时升级无意义：直接拒绝，避免浪费一次子代理调用。
+      let agentProvider = '';
       let agentModel = '';
       try {
         const header = session && session.requestHeader();
-        if (header && header.config && header.config.model) agentModel = header.config.model;
+        if (header && header.config) {
+          agentProvider = header.config.provider || '';
+          agentModel = header.config.model || '';
+        }
       } catch {
         // requestHeader is best-effort; ignore failures.
       }
+      if (agentProvider === provider && agentModel === model) {
+        throw new Error('当前执行者模型已是 ' + provider + '/' + model + '，与顾问模型相同，顾问升级没有意义——请直接自行判断，无需调用 advisor。');
+      }
+      const cwd = (session && session.header && session.header.cwd) || '';
       const context = [
         '## Working directory',
         cwd || '(unknown)',
@@ -175,7 +217,7 @@ export function apply(ctx, config = {}) {
       const signal = exec.signal && typeof AbortSignal.any === 'function'
         ? AbortSignal.any([exec.signal, AbortSignal.timeout(timeoutMs)])
         : exec.signal;
-      const advice = await consult(args.question, context, agent, signal);
+      const advice = clipAdvice(await consult(args.question, context, agent, signal));
       return { advice, model };
     },
   });

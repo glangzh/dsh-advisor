@@ -18,7 +18,7 @@
 
 ### Agent 预设安装（推荐）— 仅 Advisor 会话可用
 
-顾问能力只在选择了 **Advisor 顾问模式** 的会话里生效，其他会话不受影响。
+顾问能力只在选择了 **顾问模式** 的会话里生效，其他会话不受影响。
 
 ```sh
 git clone git@github.com:glangzh/dsh-advisor.git
@@ -26,7 +26,7 @@ cp -r dsh-advisor/preset ~/.dsh/.agent-presets/advisor
 ```
 
 然后在 Web 界面 Agent 预设选择器（或 `settings.yaml` 的 `agent-presets.default: advisor`）
-中选择 **Advisor 顾问模式**，开一个新会话即可使用。
+中选择 **顾问模式**，开一个新会话即可使用。
 
 ### 全局安装 — 所有会话可用
 

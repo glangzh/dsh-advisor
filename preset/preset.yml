@@ -1,2 +1,2 @@
 name: 顾问模式
-description: 基于 standard 的完整编码 Agent，外加顾问策略：执行者(deepseek-v4-flash)遇到难题时可升级到 deepseek-v4-pro 顾问。
+description: 遇难题时自动升级到 deepseek-v4-pro 顾问模型。
